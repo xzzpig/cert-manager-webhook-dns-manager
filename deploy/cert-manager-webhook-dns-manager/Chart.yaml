@@ -2,4 +2,4 @@ apiVersion: v1
 appVersion: "0.1.0"
 description: A cert-manager webhook powered by kube-dns-manager
 name: cert-manager-webhook-dns-manager
-version: 0.1.0
+version: 0.1.1
