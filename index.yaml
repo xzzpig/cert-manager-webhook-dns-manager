@@ -1,0 +1,13 @@
+apiVersion: v1
+entries:
+  cert-manager-webhook-dns-manager:
+  - apiVersion: v1
+    appVersion: 0.1.0
+    created: "2024-10-15T04:45:24.358140285Z"
+    description: A cert-manager webhook powered by kube-dns-manager
+    digest: 63d9a17c04e70b9f0e8e4656d0610b6c59d9d6668d814ab4d4e587f5c6ad74cc
+    name: cert-manager-webhook-dns-manager
+    urls:
+    - https://github.com/xzzpig/cert-manager-webhook-dns-manager/releases/download/cert-manager-webhook-dns-manager-0.1.1/cert-manager-webhook-dns-manager-0.1.1.tgz
+    version: 0.1.1
+generated: "2024-10-15T04:45:24.358151175Z"
