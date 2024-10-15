@@ -1,15 +1,22 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
+	"regexp"
+	"strings"
 
 	extapi "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/client-go/rest"
+	"k8s.io/klog/v2"
 
 	"github.com/cert-manager/cert-manager/pkg/acme/webhook/apis/acme/v1alpha1"
 	"github.com/cert-manager/cert-manager/pkg/acme/webhook/cmd"
+	dnsv1 "github.com/xzzpig/kube-dns-manager/api/dns/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 var GroupName = os.Getenv("GROUP_NAME")
@@ -40,7 +47,7 @@ type customDNSProviderSolver struct {
 	// 3. uncomment the relevant code in the Initialize method below
 	// 4. ensure your webhook's service account has the required RBAC role
 	//    assigned to it for interacting with the Kubernetes APIs you need.
-	//client kubernetes.Clientset
+	client client.Client
 }
 
 // customDNSProviderConfig is a structure that is used to decode into when
@@ -58,13 +65,8 @@ type customDNSProviderSolver struct {
 // be used by your provider here, you should reference a Kubernetes Secret
 // resource and fetch these credentials using a Kubernetes clientset.
 type customDNSProviderConfig struct {
-	// Change the two fields below according to the format of the configuration
-	// to be decoded.
-	// These fields will be set by users in the
-	// `issuer.spec.acme.dns01.providers.webhook.config` field.
-
-	//Email           string `json:"email"`
-	//APIKeySecretRef v1alpha1.SecretKeySelector `json:"apiKeySecretRef"`
+	Labels map[string]string `json:"labels"`
+	Extra  map[string]string `json:"extra"`
 }
 
 // Name is used as the name for this DNS solver when referencing it on the ACME
@@ -74,7 +76,7 @@ type customDNSProviderConfig struct {
 // within a single webhook deployment**.
 // For example, `cloudflare` may be used as the name of a solver.
 func (c *customDNSProviderSolver) Name() string {
-	return "my-custom-solver"
+	return "kube-dns-manager"
 }
 
 // Present is responsible for actually presenting the DNS record with the
@@ -83,15 +85,45 @@ func (c *customDNSProviderSolver) Name() string {
 // cert-manager itself will later perform a self check to ensure that the
 // solver has correctly configured the DNS provider.
 func (c *customDNSProviderSolver) Present(ch *v1alpha1.ChallengeRequest) error {
+	klog.InfoS("Presenting DNS01 challenge", "fqdn", ch.ResolvedFQDN, "uid", ch.UID, "namespace", ch.ResourceNamespace)
+
 	cfg, err := loadConfig(ch.Config)
 	if err != nil {
+		klog.ErrorS(err, "Failed to load solver configuration")
 		return err
 	}
 
-	// TODO: do something more useful with the decoded configuration
-	fmt.Printf("Decoded configuration %v", cfg)
+	ctx := context.Background()
+	dnsRecord := dnsv1.Record{}
+	dnsRecord.Name = getRecordName(ch.ResolvedFQDN)
+	if err := c.client.Get(ctx, client.ObjectKey{Namespace: ch.ResourceNamespace, Name: dnsRecord.Name}, &dnsRecord); client.IgnoreNotFound(err) != nil {
+		klog.ErrorS(err, "Failed to get DNS record", "fqdn", ch.ResolvedFQDN, "uid", ch.UID, "namespace", ch.ResourceNamespace)
+		return err
+	}
 
-	// TODO: add code that sets a record in the DNS provider's console
+	dnsRecord.Namespace = ch.ResourceNamespace
+	dnsRecord.Labels = cfg.Labels
+	dnsRecord.Spec.Name = ch.ResolvedFQDN
+	dnsRecord.Spec.Type = "TXT"
+	dnsRecord.Spec.Value = ch.Key
+	dnsRecord.Spec.Extra = cfg.Extra
+
+	// remove trailing dot
+	if strings.HasSuffix(ch.ResolvedFQDN, ".") {
+		dnsRecord.Spec.Name = ch.ResolvedFQDN[:len(ch.ResolvedFQDN)-1]
+	}
+
+	if dnsRecord.UID == "" {
+		if err := c.client.Create(ctx, &dnsRecord); err != nil {
+			klog.ErrorS(err, "Failed to create DNS record", "fqdn", ch.ResolvedFQDN, "uid", ch.UID, "namespace", ch.ResourceNamespace)
+			return err
+		}
+	} else {
+		if err := c.client.Update(ctx, &dnsRecord); err != nil {
+			klog.ErrorS(err, "Failed to update DNS record", "fqdn", ch.ResolvedFQDN, "uid", ch.UID, "namespace", ch.ResourceNamespace)
+			return err
+		}
+	}
 	return nil
 }
 
@@ -101,9 +133,22 @@ func (c *customDNSProviderSolver) Present(ch *v1alpha1.ChallengeRequest) error {
 // value provided on the ChallengeRequest should be cleaned up.
 // This is in order to facilitate multiple DNS validations for the same domain
 // concurrently.
-func (c *customDNSProviderSolver) CleanUp(ch *v1alpha1.ChallengeRequest) error {
-	// TODO: add code that deletes a record from the DNS provider's console
-	return nil
+func (c *customDNSProviderSolver) CleanUp(ch *v1alpha1.ChallengeRequest) (e error) {
+	klog.InfoS("Cleaning up DNS01 challenge", "fqdn", ch.ResolvedFQDN, "uid", ch.UID, "namespace", ch.ResourceNamespace)
+	defer func() {
+		if e != nil {
+			klog.ErrorS(e, "Failed to clean up DNS record", "fqdn", ch.ResolvedFQDN, "uid", ch.UID, "namespace", ch.ResourceNamespace)
+		}
+	}()
+
+	ctx := context.Background()
+
+	dnsRecord := dnsv1.Record{}
+	dnsRecord.Name = getRecordName(ch.ResolvedFQDN)
+	if err := c.client.Get(ctx, client.ObjectKey{Namespace: ch.ResourceNamespace, Name: dnsRecord.Name}, &dnsRecord); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	return c.client.Delete(ctx, &dnsRecord)
 }
 
 // Initialize will be called when the webhook first starts.
@@ -116,17 +161,17 @@ func (c *customDNSProviderSolver) CleanUp(ch *v1alpha1.ChallengeRequest) error {
 // The stopCh can be used to handle early termination of the webhook, in cases
 // where a SIGTERM or similar signal is sent to the webhook process.
 func (c *customDNSProviderSolver) Initialize(kubeClientConfig *rest.Config, stopCh <-chan struct{}) error {
-	///// UNCOMMENT THE BELOW CODE TO MAKE A KUBERNETES CLIENTSET AVAILABLE TO
-	///// YOUR CUSTOM DNS PROVIDER
+	schema := runtime.NewScheme()
+	if err := dnsv1.AddToScheme(schema); err != nil {
+		return err
+	}
+	cl, err := client.New(kubeClientConfig, client.Options{Scheme: schema})
+	if err != nil {
+		return err
+	}
+	c.client = cl
 
-	//cl, err := kubernetes.NewForConfig(kubeClientConfig)
-	//if err != nil {
-	//	return err
-	//}
-	//
-	//c.client = cl
-
-	///// END OF CODE TO MAKE KUBERNETES CLIENTSET AVAILABLE
+	klog.Info("Initialized DNS provider solver")
 	return nil
 }
 
@@ -143,4 +188,11 @@ func loadConfig(cfgJSON *extapi.JSON) (customDNSProviderConfig, error) {
 	}
 
 	return cfg, nil
+}
+
+func getRecordName(fqdn string) string {
+	fqdn = strings.ToLower(fqdn)
+	fqdn = regexp.MustCompile(`[^a-z0-9-]`).ReplaceAllString(fqdn, "-")
+	fqdn = strings.TrimRight(fqdn, "-")
+	return "acme-" + fqdn
 }

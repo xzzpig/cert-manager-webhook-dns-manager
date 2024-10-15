@@ -4,6 +4,7 @@ RUN apk add --no-cache git
 
 WORKDIR /workspace
 
+ENV GOPROXY=https://goproxy.io,direct
 COPY go.mod .
 COPY go.sum .
 
