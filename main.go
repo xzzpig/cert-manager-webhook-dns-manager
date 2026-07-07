@@ -12,6 +12,7 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/klog/v2"
 
+	"github.com/cert-manager/cert-manager/pkg/acme/webhook"
 	"github.com/cert-manager/cert-manager/pkg/acme/webhook/apis/acme/v1alpha1"
 	"github.com/cert-manager/cert-manager/pkg/acme/webhook/cmd"
 	dnsv1 "github.com/xzzpig/kube-dns-manager/api/dns/v1"
@@ -38,8 +39,9 @@ func main() {
 
 // customDNSProviderSolver implements the provider-specific logic needed to
 // 'present' an ACME challenge TXT record for your own DNS provider.
-// To do so, it must implement the `github.com/cert-manager/cert-manager/pkg/acme/webhook.Solver`
-// interface.
+//
+// It must implement the [webhook.Solver] interface:
+// https://pkg.go.dev/github.com/cert-manager/cert-manager/pkg/acme/webhook#Solver
 type customDNSProviderSolver struct {
 	// If a Kubernetes 'clientset' is needed, you must:
 	// 1. uncomment the additional `client` field in this structure below
@@ -49,6 +51,8 @@ type customDNSProviderSolver struct {
 	//    assigned to it for interacting with the Kubernetes APIs you need.
 	client client.Client
 }
+
+var _ webhook.Solver = (*customDNSProviderSolver)(nil)
 
 // customDNSProviderConfig is a structure that is used to decode into when
 // solving a DNS01 challenge.
